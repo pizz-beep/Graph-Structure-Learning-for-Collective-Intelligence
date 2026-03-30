@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+dist/
+build/
+
+# Data (too large for git)
+data/metrla/*.h5
+data/metrla/*.pkl
+
+# Results (commit selectively)
+results/*.pt
+results/*.png
+
+# Notebooks (clean output before committing)
+notebooks/.ipynb_checkpoints/
+
+# W&B
+wandb/

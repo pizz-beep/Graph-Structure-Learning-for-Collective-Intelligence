@@ -1,0 +1,13 @@
+dataset: metrla
+num_nodes: 207
+in_features: 2          # speed + time-of-day
+hidden_dim: 64
+gnn_layers: 2
+top_k: 10               # sparsification: keep top-k edges per node
+sparsity_lambda: 0.001  # regularization weight
+lr: 0.001
+epochs: 200
+batch_size: 32
+train_ratio: 0.7
+val_ratio: 0.1
+seed: 42
