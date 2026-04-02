@@ -56,7 +56,7 @@ class GraphStructureLearner(nn.Module):
         if not batched:
             x = x.unsqueeze(0)
 
-        B, N, F = x.shape
+        B, N, num_features = x.shape # Renamed F to num_features to avoid shadowing
 
         # Step 1: pairwise similarity scores
         if self.metric == "cosine":
