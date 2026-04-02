@@ -74,7 +74,8 @@ class GraphStructureLearner(nn.Module):
 
         # Remove self-loops
         eye = torch.eye(N, device=x.device).bool().unsqueeze(0)
-        S = S.masked_fill(eye, float('-inf'))
+        S = S.masked_fill(eye, -1e9)
+        S = torch.clamp(S, min=-1e9, max=1e9)
 
         # Step 2: sparsification
         if self.sparsify == "top_k":
@@ -97,8 +98,10 @@ class GraphStructureLearner(nn.Module):
         mask = torch.zeros_like(S)
         mask.scatter_(-1, topk_idx, 1.0)
 
-        S_masked = S * mask + (1 - mask) * float('-inf')
-        A = torch.softmax(S_masked, dim=-1)
+        S_sparse = torch.full_like(S, -1e9)
+        S_sparse.scatter_(-1, topk_idx, S.gather(-1, topk_idx))
+        A = torch.softmax(S_sparse, dim=-1)
+        A = torch.nan_to_num(A, nan=0.0)
         return A * mask
 
     @staticmethod
