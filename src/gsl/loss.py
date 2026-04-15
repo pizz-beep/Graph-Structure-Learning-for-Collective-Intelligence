@@ -1,50 +1,216 @@
-"""
-Joint Loss:  L = L_task + λ * L_sparsity
-
-L_task:     Cross-entropy (classification) or MSE (regression)
-L_sparsity: L1 norm on adjacency to encourage sparse communication graphs
-"""
+# src/gsl/loss.py
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class JointLoss(nn.Module):
-    def __init__(
-        self,
-        task: str = "classification",
-        sparsity_lambda: float = 0.001,
-        sparsity_norm: str = "l1",    # "l1" | "nuclear"
-    ):
-        super().__init__()
-        self.task = task
-        self.lam = sparsity_lambda
-        self.sparsity_norm = sparsity_norm
+# ─────────────────────────────────────────────
+# 1. Prediction loss
+# ─────────────────────────────────────────────
 
-    def forward(self, logits, targets, A) -> dict:
+class MaskedMAELoss(nn.Module):
+    """
+    Mean Absolute Error that ignores zero-valued entries.
+
+    Why mask zeros? METR-LA contains zeros where sensors were offline
+    or malfunctioning. Including those in the loss would punish the model
+    for something that isn't real signal — it would learn to predict zero
+    in ambiguous situations rather than learn the traffic pattern.
+
+    Input:
+        pred  : (B, out_steps, N)  — model predictions (normalized)
+        target: (B, out_steps, N)  — ground truth (normalized)
+    Output:
+        scalar loss value
+    """
+    def __init__(self, null_val=0.0):
+        super().__init__()
+        self.null_val = null_val
+
+    def forward(self, pred, target):
+        # Build mask: True where target is NOT the null value
+        mask = (target != self.null_val).float()
+
+        # MAE only over valid entries
+        loss = torch.abs(pred - target) * mask
+
+        # Normalize by number of valid entries (not total entries)
+        return loss.sum() / mask.sum().clamp(min=1)
+
+
+class MaskedRMSELoss(nn.Module):
+    """
+    Root Mean Squared Error with the same zero-masking logic.
+    RMSE penalizes large errors more heavily than MAE.
+    We use MAE as the training loss and RMSE as an evaluation metric —
+    training on RMSE can cause the model to over-focus on rare spikes.
+    """
+    def __init__(self, null_val=0.0):
+        super().__init__()
+        self.null_val = null_val
+
+    def forward(self, pred, target):
+        mask = (target != self.null_val).float()
+        loss = ((pred - target) ** 2) * mask
+        return torch.sqrt(loss.sum() / mask.sum().clamp(min=1))
+
+
+# ─────────────────────────────────────────────
+# 2. Graph regularization losses
+# ─────────────────────────────────────────────
+
+class SparsityLoss(nn.Module):
+    """
+    L1 penalty on the adjacency matrix entries.
+
+    Pushes edge weights toward zero — the model has to "pay" to use
+    an edge, so it only keeps connections that genuinely help prediction.
+    Without this, the model tends to keep a dense graph because that's
+    the path of least resistance.
+
+    adj   : (B, N, N)
+    Output: scalar — mean absolute value of all edge weights
+    """
+    def forward(self, adj):
+        return adj.abs().mean()
+
+
+class SmoothnessLoss(nn.Module):
+    """
+    Graph Laplacian smoothness regularizer.
+
+    Encourages connected nodes to have similar feature values.
+    Formula: (1/2) * sum_{i,j} A_{ij} * ||h_i - h_j||^2
+           = tr(H^T L H)  where L = D - A is the graph Laplacian
+
+    In plain English: if two nodes are strongly connected in your
+    learned graph, their feature representations should be similar.
+    This prevents the model from creating high-weight edges between
+    nodes whose signals don't actually resemble each other.
+
+    adj     : (B, N, N)  — learned adjacency
+    node_emb: (B, N, D)  — node embeddings from the encoder
+    Output  : scalar
+    """
+    def forward(self, adj, node_emb):
+        B, N, D = node_emb.shape
+
+        # Degree matrix (diagonal)
+        deg = adj.sum(dim=-1)                               # (B, N)
+        D_mat = torch.diag_embed(deg)                       # (B, N, N)
+
+        # Laplacian: L = D - A
+        L = D_mat - adj                                     # (B, N, N)
+
+        # Smoothness: tr(H^T L H) normalized by B*D
+        # = (1/BD) * sum_b sum_d h_d^T L h_d
+        smooth = torch.bmm(node_emb.transpose(1, 2),
+                           torch.bmm(L, node_emb))          # (B, D, D)
+        return smooth.diagonal(dim1=-2, dim2=-1).sum() / (B * D)
+
+
+class ConnectivityLoss(nn.Module):
+    """
+    Penalizes isolated nodes — nodes with very low total edge weight.
+
+    Uses a bounded ReLU penalty: loss = mean(relu(target_degree - degree))
+    Positive when degree < target_degree, exactly zero otherwise.
+    Never goes negative (the old -log formula blew up when top-k produced
+    large uniform weights, driving total loss to -600+).
+
+    adj          : (B, N, N)
+    target_degree: minimum acceptable mean edge weight per node (default 0.1)
+    Output       : scalar >= 0
+    """
+    def __init__(self, target_degree: float = 0.1):
+        super().__init__()
+        self.target_degree = target_degree
+
+    def forward(self, adj):
+        degree = adj.sum(dim=-1)                        # (B, N)
+        # relu: 0 when degree is healthy, positive when too low
+        penalty = F.relu(self.target_degree - degree)
+        return penalty.mean()
+
+
+# ─────────────────────────────────────────────
+# 3. Joint loss
+# ─────────────────────────────────────────────
+
+class GSLLoss(nn.Module):
+    """
+    The combined loss that trains the whole system end-to-end.
+
+    Total loss = task_loss
+               + lambda_s  * sparsity_loss
+               + lambda_sm * smoothness_loss
+               + lambda_c  * connectivity_loss
+
+    Args:
+        task       : "regression" (default, uses MaskedMAE — for METR-LA)
+                     "classification" (uses CrossEntropy — for synthetic / Cora)
+        lambda_s   : sparsity penalty weight
+        lambda_sm  : smoothness penalty weight
+        lambda_c   : connectivity penalty weight
+
+    For regression:
+        pred   : (B, out_steps, N)  — continuous predictions
+        target : (B, out_steps, N)  — continuous targets
+
+    For classification:
+        pred   : (B, N, C)          — class logits
+        target : (B, N)             — integer class indices (long)
+    """
+    def __init__(self, task="regression",
+                 lambda_s=0.001, lambda_sm=0.01, lambda_c=0.001):
+        super().__init__()
+        self.task      = task
+        self.lambda_s  = lambda_s
+        self.lambda_sm = lambda_sm
+        self.lambda_c  = lambda_c
+
+        if task == "regression":
+            self.task_loss = MaskedMAELoss()
+        elif task == "classification":
+            self.task_loss = nn.CrossEntropyLoss()
+        else:
+            raise ValueError(f"task must be 'regression' or 'classification', got '{task}'")
+
+        self.sparsity     = SparsityLoss()
+        self.smoothness   = SmoothnessLoss()
+        self.connectivity = ConnectivityLoss()
+
+    def forward(self, pred, target, adj, node_emb):
         if self.task == "classification":
-            task_loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                targets.view(-1).long()
+            # CrossEntropyLoss expects (B*N, C) and (B*N,)
+            B, N, C = pred.shape
+            l_task = self.task_loss(
+                pred.reshape(B * N, C),
+                target.reshape(B * N).long(),
             )
         else:
-            task_loss = F.mse_loss(logits.squeeze(-1), targets.float())
+            l_task = self.task_loss(pred, target)
 
-        if self.sparsity_norm == "l1":
-            sparsity_loss = A.abs().mean()
-        else:  # nuclear norm
-            if A.dim() == 2:
-                sparsity_loss = torch.linalg.matrix_norm(A, ord='nuc') / A.size(0)
-            else:
-                sparsity_loss = torch.stack([
-                    torch.linalg.matrix_norm(A[b], ord='nuc')
-                    for b in range(A.size(0))
-                ]).mean() / A.size(1)
+        l_sparse = self.sparsity(adj)
+        l_smooth = self.smoothness(adj, node_emb)
+        l_conn   = self.connectivity(adj)
 
-        total = task_loss + self.lam * sparsity_loss
-        return {
-            "loss": total,
-            "task_loss": task_loss.item(),
-            "sparsity_loss": sparsity_loss.item(),
+        total = (l_task
+                 + self.lambda_s  * l_sparse
+                 + self.lambda_sm * l_smooth
+                 + self.lambda_c  * l_conn)
+
+        components = {
+            "loss/total":        total.item(),
+            "loss/task":         l_task.item(),
+            "loss/sparsity":     l_sparse.item(),
+            "loss/smoothness":   l_smooth.item(),
+            "loss/connectivity": l_conn.item(),
         }
+
+        return total, components
+
+
+# Alias so existing imports (`from .loss import JointLoss`) continue to work
+JointLoss = GSLLoss

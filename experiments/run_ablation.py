@@ -22,9 +22,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.gsl.data import SyntheticGraphDataset, get_dataloaders
 from src.gsl.model import GSLNet
-from src.gsl.loss import JointLoss
+from src.gsl.loss import GSLLoss, JointLoss
 from src.gsl.train import train, evaluate
-from src.gsl.evaluate import graph_recovery_auroc, task_metrics, plot_adjacency_comparison
+from src.gsl.evaluate import graph_recovery_auroc, regression_metrics, plot_adjacency_comparison
 
 
 def make_fixed_random_adj(N, k, seed=0):
@@ -64,13 +64,14 @@ class FixedGraphGSLNet(GSLNet):
         if B is not None:
             A = A.unsqueeze(0).expand(B, -1, -1)
 
-        import torch.nn.functional as F
-        h = F.relu(self.input_proj(x))
+        # Use the GSL encoder (input_proj was removed from GSLNet)
+        node_emb = self.gsl.encoder(x)      # (B, N, hidden_dim)
+        h = node_emb
         for layer in self.gnn:
             h = layer(h, A)
         if self.task == "graph":
             h = h.mean(dim=-2)
-        return self.head(h), A
+        return self.head(h), A, node_emb
 
 
 def run_ablation(config_path: str):
@@ -90,7 +91,12 @@ def run_ablation(config_path: str):
     )
 
     results = {}
-    criterion = JointLoss(task="classification", sparsity_lambda=cfg['sparsity_lambda'])
+    criterion = GSLLoss(
+        task="classification",                          # synthetic dataset = node classification
+        lambda_s=cfg.get('sparsity_lambda', 0.001),
+        lambda_sm=cfg.get('smoothness_lambda', 0.01),
+        lambda_c=cfg.get('connectivity_lambda', 0.001),
+    )
 
     # ---- Variant 1: Random graph ----
     print("\n[1/3] Random graph baseline")
@@ -129,7 +135,7 @@ def run_ablation(config_path: str):
     model_gsl.eval()
     with torch.no_grad():
         x_batch, _ = next(iter(test_loader))
-        _, A_learned = model_gsl(x_batch.to(device))
+        _, A_learned, _ = model_gsl(x_batch.to(device))   # 3-tuple now
         A_learned = A_learned[0].cpu()  # first in batch
 
     auroc_gsl = graph_recovery_auroc(A_learned, dataset.A_true)

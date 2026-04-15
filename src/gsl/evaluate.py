@@ -11,7 +11,7 @@ plot_learned_neighborhoods — per-node top-k bar chart (the interpretability sl
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.metrics import roc_auc_score, f1_score, accuracy_score
+from sklearn.metrics import roc_auc_score
 
 
 def graph_recovery_auroc(A_pred: torch.Tensor, A_true: torch.Tensor) -> float:
@@ -23,13 +23,45 @@ def graph_recovery_auroc(A_pred: torch.Tensor, A_true: torch.Tensor) -> float:
     return roc_auc_score(true[mask], pred[mask])
 
 
-def task_metrics(logits: torch.Tensor, targets: torch.Tensor) -> dict:
-    preds = logits.argmax(-1).cpu().numpy().flatten()
-    tgts = targets.cpu().numpy().flatten()
-    return {
-        "accuracy": accuracy_score(tgts, preds),
-        "f1_macro": f1_score(tgts, preds, average='macro', zero_division=0),
-    }
+def regression_metrics(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    scaler=None,
+) -> dict:
+    """
+    Compute MAE and RMSE for traffic speed regression.
+
+    Args:
+        pred    : (B, out_steps, N) — model predictions (normalized)
+        target  : (B, out_steps, N) — ground truth     (normalized)
+        scaler  : StandardScaler — if supplied, metrics are in original
+                  units (mph). If None, metrics are in normalized units.
+
+    Returns dict with keys 'mae' and 'rmse'.
+    """
+    p = pred.detach().cpu()
+    t = target.detach().cpu()
+
+    if scaler is not None:
+        # Convert both back to mph before computing errors
+        p = torch.tensor(scaler.inverse_transform(p.numpy()))
+        t = torch.tensor(scaler.inverse_transform(t.numpy()))
+
+    # Zero mask — sensors that were offline report 0.0 in the raw data
+    mask = (t != 0.0)
+    p_valid = p[mask]
+    t_valid = t[mask]
+
+    mae  = (p_valid - t_valid).abs().mean().item()
+    rmse = ((p_valid - t_valid) ** 2).mean().sqrt().item()
+
+    return {"mae": mae, "rmse": rmse}
+
+
+# Deprecated alias — kept so old notebooks / scripts don't break immediately
+def task_metrics(logits, targets, scaler=None):
+    """Deprecated: use regression_metrics() instead."""
+    return regression_metrics(logits, targets, scaler)
 
 
 def avg_degree(A: torch.Tensor, threshold: float = 0.01) -> float:
