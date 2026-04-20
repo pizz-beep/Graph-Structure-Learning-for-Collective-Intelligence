@@ -6,7 +6,7 @@ gnn_layers: 2
 top_k: 10               # sparsification: keep top-k edges per node
 sparsity_lambda: 0.001  # regularization weight
 lr: 0.001
-epochs: 200
+epochs: 150
 batch_size: 32
 train_ratio: 0.7
 val_ratio: 0.1

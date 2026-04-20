@@ -243,6 +243,16 @@ class GraphStructureLearner(nn.Module):
 
     def forward(self, x):
         emb = self.encoder(x)           # (B, N, hidden_dim)
-        sim = self.metric(emb)          # (B, N, N)
-        adj = self.sparsifier(sim)      # (B, N, N) sparse
+        sim = self.metric(emb)          # (B, N, N) — cosine in [-1, 1]
+
+        # Clamp negatives to zero before sparsification.
+        # Negative cosine similarity means anti-correlated nodes; keeping those
+        # as negative edge weights breaks two things downstream:
+        #   1. GraphConvLayer: row-degree sum can go to ~0 or negative,
+        #      making adj_norm blow up → GNN outputs explode → task MAE = 300k
+        #   2. SmoothnessLoss: Laplacian tr(H^T L H) is only non-negative when
+        #      all edges are non-negative; negative edges drive it to -infinity.
+        sim = F.relu(sim)               # (B, N, N), all entries in [0, 1]
+
+        adj = self.sparsifier(sim)      # (B, N, N) sparse, guaranteed non-negative
         return adj, emb                 # return emb too — loss.py needs it

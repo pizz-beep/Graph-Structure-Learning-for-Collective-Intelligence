@@ -111,7 +111,7 @@ def train(model, train_loader, val_loader, criterion, optimizer, config, device)
         val_loss = evaluate(model, val_loader, criterion, device)
 
         # ── Logging ──────────────────────────────────────
-        if HAS_WANDB:
+        if HAS_WANDB and wandb.run is not None:
             wandb.log({
                 "epoch": epoch + 1,
                 "val/loss": val_loss,

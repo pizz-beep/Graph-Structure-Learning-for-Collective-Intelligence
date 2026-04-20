@@ -122,7 +122,7 @@ def split_data(data, train_ratio=0.7, val_ratio=0.1):
     val   = data[train_end:val_end]
     test  = data[val_end:]
 
-    print(f"Split → train: {train.shape}, val: {val.shape}, test: {test.shape}")
+    print(f"Split -> train: {train.shape}, val: {val.shape}, test: {test.shape}")
     return train, val, test
 
 
@@ -213,7 +213,7 @@ def build_dataloaders(h5_path, adj_dir, in_steps=12, out_steps=3,
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
     test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False)
 
-    print(f"\nBatches → train: {len(train_loader)}, "
+    print(f"\nBatches -> train: {len(train_loader)}, "
           f"val: {len(val_loader)}, test: {len(test_loader)}")
 
     return train_loader, val_loader, test_loader, scaler, adj_mx

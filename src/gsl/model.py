@@ -45,10 +45,18 @@ class GSLNet(nn.Module):
 
     def forward(self, x: torch.Tensor):
         """
+        x comes from SlidingWindowDataset as (B, in_steps, N).
+        NodeEncoder / GraphStructureLearner expect (B, N, in_steps),
+        so we transpose here once and keep the rest of the pipeline unchanged.
+
         Returns:
-            logits: [N, C] or [B, N, C] for node task
-            A:      learned adjacency (used in loss + visualization)
+            logits: [B, N, C] for node task  (or [B, C] for graph task)
+            A:      learned adjacency (B, N, N) — used in loss + visualization
+            node_emb: (B, N, hidden_dim) — returned for loss regularisation
         """
+        # (B, in_steps, N) → (B, N, in_steps)
+        x = x.transpose(1, 2)
+
         A, node_emb = self.gsl(x)
         h = node_emb
 
@@ -58,7 +66,13 @@ class GSLNet(nn.Module):
         if self.task == "graph":
             h = h.mean(dim=-2)
 
-        return self.head(h), A, node_emb
+        logits = self.head(h)  # (B, N, out_steps)
+
+        # Regression loss expects (B, out_steps, N) to align with DataLoader y
+        if self.task != "graph":
+            logits = logits.transpose(1, 2)   # (B, out_steps, N)
+
+        return logits, A, node_emb
 
     @torch.no_grad()
     def get_learned_graph(self, x: torch.Tensor) -> torch.Tensor:

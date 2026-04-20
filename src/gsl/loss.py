@@ -96,18 +96,24 @@ class SmoothnessLoss(nn.Module):
     def forward(self, adj, node_emb):
         B, N, D = node_emb.shape
 
-        # Degree matrix (diagonal)
-        deg = adj.sum(dim=-1)                               # (B, N)
-        D_mat = torch.diag_embed(deg)                       # (B, N, N)
+        # Direct pairwise smoothness: sum_{i,j} A_{ij} * ||h_i - h_j||^2
+        #
+        # The Laplacian approach (tr(H^T L H)) requires A to be SYMMETRIC and
+        # PSD. TopKSparsifier breaks symmetry (node i's top-k != node j's top-k),
+        # so L = D - A is no longer PSD and the quadratic form goes to -inf.
+        #
+        # This formula is ALWAYS >= 0:  A_{ij} >= 0 (after ReLU) and
+        # squared distances >= 0 by definition.  No symmetry needed.
+        #
+        # Equivalent identity: ||h_i - h_j||^2 = ||h_i||^2 + ||h_j||^2 - 2*h_i.h_j
+        h_sq = (node_emb ** 2).sum(-1, keepdim=True)            # (B, N, 1)
+        sq_dist = (h_sq + h_sq.transpose(1, 2)
+                   - 2 * torch.bmm(node_emb, node_emb.transpose(1, 2)))  # (B, N, N)
+        sq_dist = sq_dist.clamp(min=0)   # guard against tiny negative floats
 
-        # Laplacian: L = D - A
-        L = D_mat - adj                                     # (B, N, N)
+        # Normalize by B*N so the magnitude doesn't scale with batch/graph size
+        return (adj * sq_dist).sum() / (B * N)
 
-        # Smoothness: tr(H^T L H) normalized by B*D
-        # = (1/BD) * sum_b sum_d h_d^T L h_d
-        smooth = torch.bmm(node_emb.transpose(1, 2),
-                           torch.bmm(L, node_emb))          # (B, D, D)
-        return smooth.diagonal(dim1=-2, dim2=-1).sum() / (B * D)
 
 
 class ConnectivityLoss(nn.Module):
