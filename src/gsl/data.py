@@ -330,3 +330,5 @@ def get_dataloaders(
 
     print(f"Synthetic split -> train: {n_train}, val: {n_val}, test: {n_test}")
     return train_loader, val_loader, test_loader
+
+print(data, df.columns.tolist())

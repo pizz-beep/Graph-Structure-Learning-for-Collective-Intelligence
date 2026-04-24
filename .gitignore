@@ -14,7 +14,6 @@ data/*.pkl
 
 # Results (commit selectively)
 results/*.pt
-results/*.png
 
 # Notebooks (clean output before committing)
 notebooks/.ipynb_checkpoints/
